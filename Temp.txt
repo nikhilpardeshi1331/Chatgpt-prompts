@@ -1,4 +1,4 @@
-import psycopg2
+import configparser
 from google.cloud import storage
 
 def read_gcs_file(bucket_name, file_path):
@@ -8,48 +8,29 @@ def read_gcs_file(bucket_name, file_path):
     return blob.download_as_text()
 
 def load_config_from_gcs(bucket_name, file_path):
+    # Read file content from GCS
     config_content = read_gcs_file(bucket_name, file_path)
-    config = {}
-    for line in config_content.splitlines():
-        key, value = line.split('=')
-        config[key.strip()] = value.strip()
+    
+    # Use configparser to parse the configuration content
+    config = configparser.ConfigParser()
+    config.read_string(config_content)
+    
     return config
 
-def read_from_config_table(postgres_config):
-    try:
-        # Connect to PostgreSQL using the provided config
-        conn = psycopg2.connect(
-            dbname=postgres_config['dbname'],
-            user=postgres_config['user'],
-            host=postgres_config['host'],
-            port=postgres_config['port']
-        )
-        # Perform the necessary operations here
-        # ...
-        # For example, return a success message for now
-        return "Connection successful"
-    except Exception as e:
-        print(f"Error connecting to PostgreSQL: {e}")
-        return None
-    finally:
-        if 'conn' in locals() and conn:
-            conn.close()
-
-# Example usage:
+# Example usage
 bucket_name = "your-gcs-bucket-name"
 config_file_path = "path/to/paramlist_update.cfg"  # Adjust this path as needed
 
-# Load config from GCS
+# Load the configuration from GCS
 config = load_config_from_gcs(bucket_name, config_file_path)
 
-# Define PostgreSQL connection parameters
+# Access the PostgreSQL configuration values
 postgres_config = {
-    'dbname': config.get('dbname', 'Default'),
-    'user': config.get('user', 'Default'),
-    'host': config.get('host', 'Default'),
-    'port': config.get('port', 'Default')
+    'dbname': config['DEFAULT'].get('dbname', 'Default'),
+    'user': config['DEFAULT'].get('user', 'Default'),
+    'host': config['DEFAULT'].get('host', 'Default'),
+    'port': config['DEFAULT'].get('port', 'Default')
 }
 
-# Connect to PostgreSQL and perform operations
-result_dict = read_from_config_table(postgres_config)
-print(result_dict)
+# Now you can use `postgres_config` to connect to PostgreSQL
+print(postgres_config)
