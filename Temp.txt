@@ -1,30 +1,55 @@
-class LoadDataToPostgres(beam.DoFn):
-    def __init__(self, db_config):
-        self.db_config = db_config
+import psycopg2
+from google.cloud import storage
 
-    def setup(self):
-        self.conn = psycopg2.connect(**self.db_config)
-        self.cursor = self.conn.cursor()
-        self.bq_client = bigquery.Client()
+def read_gcs_file(bucket_name, file_path):
+    client = storage.Client()
+    bucket = client.get_bucket(bucket_name)
+    blob = bucket.blob(file_path)
+    return blob.download_as_text()
 
-    def process(self, element):
-        table_name, bq_path = element
+def load_config_from_gcs(bucket_name, file_path):
+    config_content = read_gcs_file(bucket_name, file_path)
+    config = {}
+    for line in config_content.splitlines():
+        key, value = line.split('=')
+        config[key.strip()] = value.strip()
+    return config
 
-        with open(bq_path, 'r') as file:
-            bq_query = file.read()
+def read_from_config_table(postgres_config):
+    try:
+        # Connect to PostgreSQL using the provided config
+        conn = psycopg2.connect(
+            dbname=postgres_config['dbname'],
+            user=postgres_config['user'],
+            host=postgres_config['host'],
+            port=postgres_config['port']
+        )
+        # Perform the necessary operations here
+        # ...
+        # For example, return a success message for now
+        return "Connection successful"
+    except Exception as e:
+        print(f"Error connecting to PostgreSQL: {e}")
+        return None
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
-        query_job = self.bq_client.query(bq_query)
-        results = query_job.result()
+# Example usage:
+bucket_name = "your-gcs-bucket-name"
+config_file_path = "path/to/paramlist_update.cfg"  # Adjust this path as needed
 
-        # Dynamically construct the insert statement based on BigQuery query columns
-        insert_query = f"INSERT INTO {table_name} ({', '.join([row.name for row in results.schema])}) VALUES ({', '.join(['%s'] * len(results.schema))});"
+# Load config from GCS
+config = load_config_from_gcs(bucket_name, config_file_path)
 
-        # Insert data directly from BigQuery results
-        for row in results:
-            self.cursor.execute(insert_query, tuple(row))
+# Define PostgreSQL connection parameters
+postgres_config = {
+    'dbname': config.get('dbname', 'Default'),
+    'user': config.get('user', 'Default'),
+    'host': config.get('host', 'Default'),
+    'port': config.get('port', 'Default')
+}
 
-        self.conn.commit()
-
-    def teardown(self):
-        self.cursor.close()
-        self.conn.close()
+# Connect to PostgreSQL and perform operations
+result_dict = read_from_config_table(postgres_config)
+print(result_dict)
