@@ -1,36 +1,63 @@
-import configparser
+import csv
+import random
+import string
+from faker import Faker
 from google.cloud import storage
+from datetime import datetime
+import os
 
-def read_gcs_file(bucket_name, file_path):
-    client = storage.Client()
-    bucket = client.get_bucket(bucket_name)
-    blob = bucket.blob(file_path)
-    return blob.download_as_text()
+# Initialize Faker for generating random names, dates, etc.
+fake = Faker()
 
-def load_config_from_gcs(bucket_name, file_path):
-    # Read file content from GCS
-    config_content = read_gcs_file(bucket_name, file_path)
+# Function to generate random string
+def generate_random_string(length=10):
+    return ''.join(random.choices(string.ascii_letters, k=length))
+
+# Function to generate random date
+def generate_random_date():
+    return fake.date()
+
+# Function to generate random integer
+def generate_random_int(min_value=1, max_value=100):
+    return random.randint(min_value, max_value)
+
+# Function to generate and save CSV file
+def generate_csv_file(file_path, num_rows=100):
+    with open(file_path, 'w', newline='') as file:
+        writer = csv.writer(file)
+        # Write header
+        writer.writerow(["RandomString", "RandomDate", "RandomInt"])
+        
+        # Generate random data
+        for _ in range(num_rows):
+            writer.writerow([generate_random_string(), generate_random_date(), generate_random_int()])
+
+# Function to upload file to GCS
+def upload_to_gcs(bucket_name, source_file_name, destination_blob_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+
+    blob.upload_from_filename(source_file_name)
+    print(f"File {source_file_name} uploaded to GCS bucket {bucket_name} as {destination_blob_name}.")
+
+# Main function to run the script
+def main():
+    # Define local file path and GCS bucket details
+    local_file_path = "random_data.csv"
+    bucket_name = "your-gcs-bucket-name"  # Replace with your GCS bucket name
+    destination_blob_name = "random_data/random_data.csv"
     
-    # Use configparser to parse the configuration content
-    config = configparser.ConfigParser()
-    config.read_string(config_content)
+    # Generate random data and save to CSV
+    generate_csv_file(local_file_path, num_rows=100)
     
-    return config
+    # Upload the CSV to GCS
+    upload_to_gcs(bucket_name, local_file_path, destination_blob_name)
+    
+    # Clean up the local file if necessary
+    if os.path.exists(local_file_path):
+        os.remove(local_file_path)
+        print(f"Local file {local_file_path} removed.")
 
-# Example usage
-bucket_name = "your-gcs-bucket-name"
-config_file_path = "path/to/paramlist_update.cfg"  # Adjust this path as needed
-
-# Load the configuration from GCS
-config = load_config_from_gcs(bucket_name, config_file_path)
-
-# Access the PostgreSQL configuration values
-postgres_config = {
-    'dbname': config['DEFAULT'].get('dbname', 'Default'),
-    'user': config['DEFAULT'].get('user', 'Default'),
-    'host': config['DEFAULT'].get('host', 'Default'),
-    'port': config['DEFAULT'].get('port', 'Default')
-}
-
-# Now you can use `postgres_config` to connect to PostgreSQL
-print(postgres_config)
+if __name__ == "__main__":
+    main()
