@@ -12,14 +12,12 @@ gcp_options.staging_location = 'gs://your-bucket/staging'  # Replace with your G
 gcp_options.temp_location = 'gs://your-bucket/temp'  # Replace with your GCS bucket
 options.view_as(GoogleCloudOptions).runner = 'DataflowRunner'  # Use DataflowRunner for GCP
 
-# BigQuery table schema definition
-table_schema = {
-    'fields': [
-        {'name': 'id', 'type': 'INTEGER', 'mode': 'REQUIRED'},
-        {'name': 'name', 'type': 'STRING', 'mode': 'NULLABLE'},
-        {'name': 'age', 'type': 'INTEGER', 'mode': 'NULLABLE'},
-    ]
-}
+# Corrected BigQuery table schema using SchemaField
+table_schema = [
+    bigquery.SchemaField("id", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("age", "INTEGER", mode="NULLABLE")
+]
 
 # Function to create BigQuery table
 def create_bigquery_table():
