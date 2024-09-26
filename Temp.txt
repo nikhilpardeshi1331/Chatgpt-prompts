@@ -1,63 +1,57 @@
-import csv
-import random
-import string
-from faker import Faker
-from google.cloud import storage
-from datetime import datetime
-import os
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
+from google.cloud import bigquery
 
-# Initialize Faker for generating random names, dates, etc.
-fake = Faker()
+# Define pipeline options
+options = PipelineOptions()
+gcp_options = options.view_as(GoogleCloudOptions)
+gcp_options.project = 'your-gcp-project-id'  # Replace with your GCP project ID
+gcp_options.region = 'your-region'  # Replace with your GCP region
+gcp_options.job_name = 'create-bigquery-table-job'
+gcp_options.staging_location = 'gs://your-bucket/staging'  # Replace with your GCS bucket
+gcp_options.temp_location = 'gs://your-bucket/temp'  # Replace with your GCS bucket
+options.view_as(GoogleCloudOptions).runner = 'DataflowRunner'  # Use DataflowRunner for GCP
 
-# Function to generate random string
-def generate_random_string(length=10):
-    return ''.join(random.choices(string.ascii_letters, k=length))
+# BigQuery table schema definition
+table_schema = {
+    'fields': [
+        {'name': 'id', 'type': 'INTEGER', 'mode': 'REQUIRED'},
+        {'name': 'name', 'type': 'STRING', 'mode': 'NULLABLE'},
+        {'name': 'age', 'type': 'INTEGER', 'mode': 'NULLABLE'},
+    ]
+}
 
-# Function to generate random date
-def generate_random_date():
-    return fake.date()
-
-# Function to generate random integer
-def generate_random_int(min_value=1, max_value=100):
-    return random.randint(min_value, max_value)
-
-# Function to generate and save CSV file
-def generate_csv_file(file_path, num_rows=100):
-    with open(file_path, 'w', newline='') as file:
-        writer = csv.writer(file)
-        # Write header
-        writer.writerow(["RandomString", "RandomDate", "RandomInt"])
-        
-        # Generate random data
-        for _ in range(num_rows):
-            writer.writerow([generate_random_string(), generate_random_date(), generate_random_int()])
-
-# Function to upload file to GCS
-def upload_to_gcs(bucket_name, source_file_name, destination_blob_name):
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-
-    blob.upload_from_filename(source_file_name)
-    print(f"File {source_file_name} uploaded to GCS bucket {bucket_name} as {destination_blob_name}.")
-
-# Main function to run the script
-def main():
-    # Define local file path and GCS bucket details
-    local_file_path = "random_data.csv"
-    bucket_name = "your-gcs-bucket-name"  # Replace with your GCS bucket name
-    destination_blob_name = "random_data/random_data.csv"
+# Function to create BigQuery table
+def create_bigquery_table():
+    client = bigquery.Client()
     
-    # Generate random data and save to CSV
-    generate_csv_file(local_file_path, num_rows=100)
+    # Define dataset and table information
+    dataset_id = 'your_dataset_id'  # Replace with your dataset ID
+    table_id = 'your_table_id'      # Replace with your table ID
     
-    # Upload the CSV to GCS
-    upload_to_gcs(bucket_name, local_file_path, destination_blob_name)
+    # Build the full table reference
+    table_ref = f'{gcp_options.project}.{dataset_id}.{table_id}'
     
-    # Clean up the local file if necessary
-    if os.path.exists(local_file_path):
-        os.remove(local_file_path)
-        print(f"Local file {local_file_path} removed.")
+    # Create a Table object with the defined schema
+    table = bigquery.Table(table_ref, schema=table_schema)
+    
+    try:
+        # Check if the table exists
+        client.get_table(table_ref)
+        print(f"Table {table_id} already exists.")
+    except Exception as e:
+        # If the table doesn't exist, create it
+        client.create_table(table)
+        print(f"Table {table_id} created successfully.")
 
-if __name__ == "__main__":
-    main()
+# Apache Beam pipeline to trigger table creation
+def run():
+    with beam.Pipeline(options=options) as p:
+        # This is a simple step to trigger the BigQuery table creation logic
+        (p
+         | 'Start Process' >> beam.Create([1])  # A dummy element to trigger the process
+         | 'Create BQ Table' >> beam.Map(lambda x: create_bigquery_table())  # Create table step
+        )
+
+if __name__ == '__main__':
+    run()
