@@ -2,6 +2,8 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions, StandardOptions
 from apache_beam.io.jdbc import ReadFromJdbc
 from apache_beam.io import WriteToText
+import psycopg2
+import logging
 
 class MyPipelineOptions(PipelineOptions):
     @classmethod
@@ -10,6 +12,54 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_value_provider_argument('--jdbc_url', type=str, help='JDBC URL for Postgres')
         parser.add_value_provider_argument('--jdbc_username', type=str, help='Postgres Username')
         parser.add_value_provider_argument('--jdbc_password', type=str, help='Postgres Password')
+
+# Function to read from PostgreSQL config table
+def readFromConfigTable(postgres_config, config_table):
+    try:
+        # Establish connection to PostgreSQL
+        conn = psycopg2.connect(
+            dbname=postgres_config['dbname'],
+            user=postgres_config['user'],
+            password=postgres_config['password'],
+            host=postgres_config['p_host'],
+            port=postgres_config['port']
+        )
+
+        logging.info("========== Fetching details from PostgreSQL config table ==========")
+        cursor = conn.cursor()
+
+        # Execute query
+        cursor.execute(f"""
+            SELECT serial_no_pk, tgt_tab_name, exec_sql_file_path 
+            FROM {config_table} 
+            WHERE status IN ('OPEN', 'FAILED')
+        """)
+
+        rows = cursor.fetchall()
+        if not rows:
+            logging.info(f"No open jobs are present in the config table.")
+            print(f"No open jobs are present in the config table.")
+            return None
+
+        # Extract column names
+        column_names = [desc[0] for desc in cursor.description]
+
+        # Convert rows into a list of dictionaries
+        result_dict = [dict(zip(column_names, row)) for row in rows]
+
+        print(f"******* Result Dictionary ******: {result_dict}")
+        logging.info(f"Result Dictionary ******: {result_dict}")
+
+        return result_dict
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
+        print(f"Error occurred: {e}")
+        return None
+
+    finally:
+        cursor.close()
+        conn.close()
 
 def run():
     # Set pipeline options
@@ -21,96 +71,41 @@ def run():
     google_cloud_options.temp_location = 'gs://your-bucket/temp'
     options.view_as(StandardOptions).runner = 'DataflowRunner'
 
-    # Define SQL query to fetch data from config table
-    query = """
-    SELECT serial_no_pk, tgt_tab_name, exec_sql_file_path
-    FROM config_table
-    WHERE status IN ('OPEN', 'FAILED')
-    """
+    # Configuration for reading from PostgreSQL
+    postgres_config = {
+        'dbname': 'your_db_name',
+        'user': 'your_user_name',
+        'password': 'your_password',
+        'p_host': 'your_postgres_host',
+        'port': 'your_postgres_port'
+    }
+    
+    config_table = 'your_config_table'
 
-    with beam.Pipeline(options=options) as p:
-        # Read data from PostgreSQL
-        rows = (
-            p
-            | "Read from PostgreSQL" >> ReadFromJdbc(
-                driver_class_name='org.postgresql.Driver',
-                jdbc_url=options.jdbc_url,
-                query=query,
-                username=options.jdbc_username,
-                password=options.jdbc_password
+    # Fetching config table entries from PostgreSQL
+    result_dict = readFromConfigTable(postgres_config, config_table)
+
+    if result_dict:
+        with beam.Pipeline(options=options) as p:
+            # Convert rows to CSV format
+            def format_to_csv(row):
+                return ','.join([str(row['serial_no_pk']), row['tgt_tab_name'], row['exec_sql_file_path']])
+
+            # Processing each result row from the config table
+            result_collection = p | "Create Input Collection" >> beam.Create(result_dict)
+
+            csv_lines = (
+                result_collection
+                | "Convert to CSV" >> beam.Map(format_to_csv)
             )
-        )
 
-        # Convert rows to CSV format
-        def format_to_csv(row):
-            return ','.join([str(row['serial_no_pk']), row['tgt_tab_name'], row['exec_sql_file_path']])
-
-        csv_lines = (
-            rows
-            | "Convert to CSV" >> beam.Map(format_to_csv)
-        )
-
-        # Write to GCS with a header
-        header = 'serial_no_pk,tgt_tab_name,exec_sql_file_path'
-        csv_lines | "Write to GCS" >> WriteToText(
-            options.gcs_output_path.get(),
-            file_name_suffix='.csv',
-            header=header
-        )
-
-if __name__ == '__main__':
-    run()
-
-
-
-
-import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions, StandardOptions
-
-class MyPipelineOptions(PipelineOptions):
-    @classmethod
-    def _add_argparse_args(cls, parser):
-        parser.add_value_provider_argument('--gcs_input_path', type=str, help='GCS path of the input CSV file')
-        parser.add_value_provider_argument('--postgres_output_table', type=str, help='Postgres target table')
-
-def run():
-    # Initialize pipeline options
-    options = MyPipelineOptions()
-    google_cloud_options = options.view_as(GoogleCloudOptions)
-    google_cloud_options.project = 'your-gcp-project'
-    google_cloud_options.job_name = 'gcs-to-postgres-insert'
-    google_cloud_options.staging_location = 'gs://your-bucket/staging'
-    google_cloud_options.temp_location = 'gs://your-bucket/temp'
-    options.view_as(StandardOptions).runner = 'DataflowRunner'
-
-    with beam.Pipeline(options=options) as p:
-        # Read CSV from GCS
-        csv_data = (
-            p
-            | "Read CSV from GCS" >> beam.io.ReadFromText(options.gcs_input_path.get(), skip_header_lines=1)
-        )
-
-        # Parse CSV lines
-        def parse_csv(line):
-            fields = line.split(',')
-            return {
-                'serial_no_pk': fields[0],
-                'tgt_tab_name': fields[1],
-                'exec_sql_file_path': fields[2]
-            }
-
-        parsed_data = (
-            csv_data
-            | "Parse CSV" >> beam.Map(parse_csv)
-        )
-
-        # Logic for inserting data into Postgres (to be customized as needed)
-        def insert_to_postgres(row):
-            # Placeholder: Implement logic to insert into PostgreSQL
-            print(f"Inserting {row} into Postgres table {options.postgres_output_table.get()}")
-
-        # Apply the insert operation
-        parsed_data | "Insert into Postgres" >> beam.Map(insert_to_postgres)
+            # Write to GCS with a header
+            header = 'serial_no_pk,tgt_tab_name,exec_sql_file_path'
+            csv_lines | "Write to GCS" >> WriteToText(
+                options.gcs_output_path.get(),
+                file_name_suffix='.csv',
+                header=header
+            )
 
 if __name__ == '__main__':
     run()
