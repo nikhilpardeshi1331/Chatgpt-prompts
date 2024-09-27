@@ -1,111 +1,46 @@
-import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions, StandardOptions
-from apache_beam.io.jdbc import ReadFromJdbc
-from apache_beam.io import WriteToText
-import psycopg2
-import logging
+from google.cloud import storage
+import csv
+import io
 
-class MyPipelineOptions(PipelineOptions):
-    @classmethod
-    def _add_argparse_args(cls, parser):
-        parser.add_value_provider_argument('--gcs_output_path', type=str, help='GCS Output path for CSV')
-        parser.add_value_provider_argument('--jdbc_url', type=str, help='JDBC URL for Postgres')
-        parser.add_value_provider_argument('--jdbc_username', type=str, help='Postgres Username')
-        parser.add_value_provider_argument('--jdbc_password', type=str, help='Postgres Password')
-
-# Function to read from PostgreSQL config table
-def readFromConfigTable(postgres_config, config_table):
-    try:
-        # Establish connection to PostgreSQL
-        conn = psycopg2.connect(
-            dbname=postgres_config['dbname'],
-            user=postgres_config['user'],
-            password=postgres_config['password'],
-            host=postgres_config['p_host'],
-            port=postgres_config['port']
-        )
-
-        logging.info("========== Fetching details from PostgreSQL config table ==========")
-        cursor = conn.cursor()
-
-        # Execute query
-        cursor.execute(f"""
-            SELECT serial_no_pk, tgt_tab_name, exec_sql_file_path 
-            FROM {config_table} 
-            WHERE status IN ('OPEN', 'FAILED')
-        """)
-
-        rows = cursor.fetchall()
-        if not rows:
-            logging.info(f"No open jobs are present in the config table.")
-            print(f"No open jobs are present in the config table.")
-            return None
-
-        # Extract column names
-        column_names = [desc[0] for desc in cursor.description]
-
-        # Convert rows into a list of dictionaries
-        result_dict = [dict(zip(column_names, row)) for row in rows]
-
-        print(f"******* Result Dictionary ******: {result_dict}")
-        logging.info(f"Result Dictionary ******: {result_dict}")
-
-        return result_dict
-
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-        print(f"Error occurred: {e}")
-        return None
-
-    finally:
-        cursor.close()
-        conn.close()
-
-def run():
-    # Set pipeline options
-    options = MyPipelineOptions()
-    google_cloud_options = options.view_as(GoogleCloudOptions)
-    google_cloud_options.project = 'your-gcp-project'
-    google_cloud_options.job_name = 'postgres-to-gcs-csv'
-    google_cloud_options.staging_location = 'gs://your-bucket/staging'
-    google_cloud_options.temp_location = 'gs://your-bucket/temp'
-    options.view_as(StandardOptions).runner = 'DataflowRunner'
-
-    # Configuration for reading from PostgreSQL
-    postgres_config = {
-        'dbname': 'your_db_name',
-        'user': 'your_user_name',
-        'password': 'your_password',
-        'p_host': 'your_postgres_host',
-        'port': 'your_postgres_port'
-    }
+def read_gcs_csv_to_dict(bucket_name, blob_name):
+    """
+    Reads a CSV file from GCS and converts each row into a dictionary.
     
-    config_table = 'your_config_table'
+    :param bucket_name: Name of the GCS bucket.
+    :param blob_name: Path to the CSV file in the GCS bucket.
+    :return: List of dictionaries with column names as keys.
+    """
+    # Initialize a GCS client
+    client = storage.Client()
+    
+    # Get the bucket and the blob (file)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
 
-    # Fetching config table entries from PostgreSQL
-    result_dict = readFromConfigTable(postgres_config, config_table)
+    # Download the blob's content as a string
+    csv_data = blob.download_as_text()
 
-    if result_dict:
-        with beam.Pipeline(options=options) as p:
-            # Convert rows to CSV format
-            def format_to_csv(row):
-                return ','.join([str(row['serial_no_pk']), row['tgt_tab_name'], row['exec_sql_file_path']])
+    # Read the CSV from the string data
+    data = []
+    csv_reader = csv.DictReader(io.StringIO(csv_data))
 
-            # Processing each result row from the config table
-            result_collection = p | "Create Input Collection" >> beam.Create(result_dict)
+    # Iterate over each row and store it as a dictionary
+    for row in csv_reader:
+        data.append(row)
 
-            csv_lines = (
-                result_collection
-                | "Convert to CSV" >> beam.Map(format_to_csv)
-            )
+    return data
 
-            # Write to GCS with a header
-            header = 'serial_no_pk,tgt_tab_name,exec_sql_file_path'
-            csv_lines | "Write to GCS" >> WriteToText(
-                options.gcs_output_path.get(),
-                file_name_suffix='.csv',
-                header=header
-            )
+def main():
+    # GCS bucket and CSV file path
+    bucket_name = 'your-gcs-bucket'
+    csv_blob_path = 'output/config_data.csv'
+    
+    # Read the CSV file from GCS and convert it to a list of dictionaries
+    result_dicts = read_gcs_csv_to_dict(bucket_name, csv_blob_path)
+    
+    # Print the result to verify
+    for result in result_dicts:
+        print(result)
 
 if __name__ == '__main__':
-    run()
+    main()
