@@ -1,54 +1,61 @@
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
-from google.cloud import bigquery
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions, StandardOptions
+from apache_beam.io.jdbc import ReadFromJdbc
+from apache_beam.io import WriteToText
 
-# Define pipeline options
-options = PipelineOptions()
-gcp_options = options.view_as(GoogleCloudOptions)
-gcp_options.project = 'your-gcp-project-id'  # Replace with your GCP project ID
-gcp_options.region = 'your-region'  # Replace with your GCP region
-gcp_options.job_name = 'create-bigquery-table-job'
-gcp_options.staging_location = 'gs://your-bucket/staging'  # Replace with your GCS bucket
-gcp_options.temp_location = 'gs://your-bucket/temp'  # Replace with your GCS bucket
-options.view_as(GoogleCloudOptions).runner = 'DataflowRunner'  # Use DataflowRunner for GCP
+class MyPipelineOptions(PipelineOptions):
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_value_provider_argument('--gcs_output_path', type=str, help='GCS Output path for CSV')
+        parser.add_value_provider_argument('--jdbc_url', type=str, help='JDBC URL for Postgres')
+        parser.add_value_provider_argument('--jdbc_username', type=str, help='Postgres Username')
+        parser.add_value_provider_argument('--jdbc_password', type=str, help='Postgres Password')
 
-# Corrected BigQuery table schema using SchemaField
-table_schema = [
-    bigquery.SchemaField("id", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("name", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("age", "INTEGER", mode="NULLABLE")
-]
-
-# Function to create BigQuery table
-def create_bigquery_table():
-    client = bigquery.Client()
-    
-    # Define dataset and table information
-    dataset_id = 'your_dataset_id'  # Replace with your dataset ID
-    table_id = 'your_table_id'      # Replace with your table ID
-    
-    # Build the full table reference
-    table_ref = f'{gcp_options.project}.{dataset_id}.{table_id}'
-    
-    # Create a Table object with the defined schema
-    table = bigquery.Table(table_ref, schema=table_schema)
-    
-    try:
-        # Check if the table exists
-        client.get_table(table_ref)
-        print(f"Table {table_id} already exists.")
-    except Exception as e:
-        # If the table doesn't exist, create it
-        client.create_table(table)
-        print(f"Table {table_id} created successfully.")
-
-# Apache Beam pipeline to trigger table creation
 def run():
+    # Set pipeline options
+    options = MyPipelineOptions()
+    google_cloud_options = options.view_as(GoogleCloudOptions)
+    google_cloud_options.project = 'your-gcp-project'
+    google_cloud_options.job_name = 'postgres-to-gcs-csv'
+    google_cloud_options.staging_location = 'gs://your-bucket/staging'
+    google_cloud_options.temp_location = 'gs://your-bucket/temp'
+    options.view_as(StandardOptions).runner = 'DataflowRunner'
+
+    # Define SQL query to fetch data from config table
+    query = """
+    SELECT serial_no_pk, tgt_tab_name, exec_sql_file_path
+    FROM config_table
+    WHERE status IN ('OPEN', 'FAILED')
+    """
+
     with beam.Pipeline(options=options) as p:
-        # This is a simple step to trigger the BigQuery table creation logic
-        (p
-         | 'Start Process' >> beam.Create([1])  # A dummy element to trigger the process
-         | 'Create BQ Table' >> beam.Map(lambda x: create_bigquery_table())  # Create table step
+        # Read data from PostgreSQL
+        rows = (
+            p
+            | "Read from PostgreSQL" >> ReadFromJdbc(
+                driver_class_name='org.postgresql.Driver',
+                jdbc_url=options.jdbc_url,
+                query=query,
+                username=options.jdbc_username,
+                password=options.jdbc_password
+            )
+        )
+
+        # Convert rows to CSV format
+        def format_to_csv(row):
+            return ','.join([str(row['serial_no_pk']), row['tgt_tab_name'], row['exec_sql_file_path']])
+
+        csv_lines = (
+            rows
+            | "Convert to CSV" >> beam.Map(format_to_csv)
+        )
+
+        # Write to GCS with a header
+        header = 'serial_no_pk,tgt_tab_name,exec_sql_file_path'
+        csv_lines | "Write to GCS" >> WriteToText(
+            options.gcs_output_path.get(),
+            file_name_suffix='.csv',
+            header=header
         )
 
 if __name__ == '__main__':
