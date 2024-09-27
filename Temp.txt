@@ -2,7 +2,95 @@ from google.cloud import storage
 import csv
 import io
 
-def get_latest_csv_file_from_gcs(bucket_name, folder_path):
+def import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
+from google.cloud import bigquery
+import psycopg2
+
+# Define pipeline options
+options = PipelineOptions()
+gcp_options = options.view_as(GoogleCloudOptions)
+gcp_options.project = 'your-gcp-project-id'  # Replace with your GCP project ID
+gcp_options.region = 'your-region'  # Replace with your GCP region
+gcp_options.job_name = 'temp-bq-to-postgres-job'
+gcp_options.staging_location = 'gs://your-bucket/staging'  # Replace with your GCS bucket
+gcp_options.temp_location = 'gs://your-bucket/temp'  # Replace with your GCS bucket
+options.view_as(GoogleCloudOptions).runner = 'DataflowRunner'  # Use DataflowRunner for GCP
+
+# PostgreSQL connection parameters
+pg_conn_params = {
+    'dbname': 'your_dbname',
+    'user': 'your_username',
+    'password': 'your_password',
+    'host': 'your_postgres_host',
+    'port': 5432
+}
+
+# SQL queries
+create_temp_table_sql = """
+CREATE TEMPORARY TABLE temp_table1 AS (
+    SELECT * FROM your_source_table1 WHERE <conditions>
+);
+CREATE TEMPORARY TABLE temp_table2 AS (
+    SELECT * FROM your_source_table2 WHERE <conditions>
+);
+"""
+
+join_query = """
+SELECT t1.*, t2.*
+FROM temp_table1 t1
+JOIN temp_table2 t2 ON t1.id = t2.id
+"""
+
+# Function to create temporary tables in BigQuery
+def create_temp_tables_in_bq():
+    client = bigquery.Client()
+    client.query(create_temp_table_sql).result()  # Execute the SQL to create temp tables
+
+# Function to load data into PostgreSQL
+def load_data_to_postgres(data):
+    conn = psycopg2.connect(**pg_conn_params)
+    cur = conn.cursor()
+    
+    # Insert data into PostgreSQL table
+    insert_query = "INSERT INTO your_postgres_table (columns...) VALUES %s"  # Customize your insert query
+
+    try:
+        cur.execute(insert_query, data)  # Modify this as needed for the data format
+        conn.commit()
+        print("Data loaded successfully into PostgreSQL.")
+    except Exception as e:
+        print(f"Error loading data: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+# Function to drop temporary tables in BigQuery
+def drop_temp_tables():
+    client = bigquery.Client()
+    client.query("DROP TABLE IF EXISTS temp_table1, temp_table2").result()
+
+# Apache Beam pipeline to manage the flow
+def run():
+    with beam.Pipeline(options=options) as p:
+        # Create temporary tables in BigQuery
+        create_temp_tables = (p
+            | 'Start Process' >> beam.Create([1])  # Dummy element to trigger process
+            | 'Create Temp Tables' >> beam.Map(lambda x: create_temp_tables_in_bq())
+        )
+
+        # Load data into PostgreSQL
+        loaded_data = (p
+            | 'Join and Load Data' >> beam.Map(lambda x: load_data_to_postgres(join_query))
+        )
+
+        # Drop temporary tables after loading
+        (loaded_data
+            | 'Drop Temp Tables' >> beam.Map(lambda _: drop_temp_tables())
+        )
+
+if __name__ == '__main__':
+    run(), folder_path):
     """
     Lists files in the GCS folder and returns the latest CSV file.
     
