@@ -60,3 +60,57 @@ def run():
 
 if __name__ == '__main__':
     run()
+
+
+
+
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions, StandardOptions
+
+class MyPipelineOptions(PipelineOptions):
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_value_provider_argument('--gcs_input_path', type=str, help='GCS path of the input CSV file')
+        parser.add_value_provider_argument('--postgres_output_table', type=str, help='Postgres target table')
+
+def run():
+    # Initialize pipeline options
+    options = MyPipelineOptions()
+    google_cloud_options = options.view_as(GoogleCloudOptions)
+    google_cloud_options.project = 'your-gcp-project'
+    google_cloud_options.job_name = 'gcs-to-postgres-insert'
+    google_cloud_options.staging_location = 'gs://your-bucket/staging'
+    google_cloud_options.temp_location = 'gs://your-bucket/temp'
+    options.view_as(StandardOptions).runner = 'DataflowRunner'
+
+    with beam.Pipeline(options=options) as p:
+        # Read CSV from GCS
+        csv_data = (
+            p
+            | "Read CSV from GCS" >> beam.io.ReadFromText(options.gcs_input_path.get(), skip_header_lines=1)
+        )
+
+        # Parse CSV lines
+        def parse_csv(line):
+            fields = line.split(',')
+            return {
+                'serial_no_pk': fields[0],
+                'tgt_tab_name': fields[1],
+                'exec_sql_file_path': fields[2]
+            }
+
+        parsed_data = (
+            csv_data
+            | "Parse CSV" >> beam.Map(parse_csv)
+        )
+
+        # Logic for inserting data into Postgres (to be customized as needed)
+        def insert_to_postgres(row):
+            # Placeholder: Implement logic to insert into PostgreSQL
+            print(f"Inserting {row} into Postgres table {options.postgres_output_table.get()}")
+
+        # Apply the insert operation
+        parsed_data | "Insert into Postgres" >> beam.Map(insert_to_postgres)
+
+if __name__ == '__main__':
+    run()
