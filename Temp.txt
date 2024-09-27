@@ -2,6 +2,34 @@ from google.cloud import storage
 import csv
 import io
 
+def get_latest_csv_file_from_gcs(bucket_name, folder_path):
+    """
+    Lists files in the GCS folder and returns the latest CSV file.
+    
+    :param bucket_name: Name of the GCS bucket.
+    :param folder_path: Path to the folder in the GCS bucket.
+    :return: The path to the latest CSV file in the folder.
+    """
+    # Initialize a GCS client
+    client = storage.Client()
+    
+    # Get the bucket
+    bucket = client.bucket(bucket_name)
+    
+    # List all the blobs in the folder
+    blobs = bucket.list_blobs(prefix=folder_path)
+    
+    # Filter CSV files from the folder
+    csv_files = [blob.name for blob in blobs if blob.name.endswith('.csv')]
+    
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in the folder {folder_path}")
+
+    # For now, we just return the first CSV file
+    latest_csv = csv_files[0]
+    
+    return latest_csv
+
 def read_gcs_csv_to_dict(bucket_name, blob_name):
     """
     Reads a CSV file from GCS and converts each row into a dictionary.
@@ -30,10 +58,15 @@ def read_gcs_csv_to_dict(bucket_name, blob_name):
 
     return data
 
-def main():
-    # GCS bucket and CSV file path
+def run(argv=None):
+    # GCS bucket and folder path
     bucket_name = 'your-gcs-bucket'
-    csv_blob_path = 'output/config_data.csv'
+    folder_path = 'ns_pega_etl/output/'
+    
+    # Get the latest CSV file in the folder dynamically
+    csv_blob_path = get_latest_csv_file_from_gcs(bucket_name, folder_path)
+    
+    print(f"Latest CSV file: {csv_blob_path}")
     
     # Read the CSV file from GCS and convert it to a list of dictionaries
     result_dicts = read_gcs_csv_to_dict(bucket_name, csv_blob_path)
@@ -43,4 +76,4 @@ def main():
         print(result)
 
 if __name__ == '__main__':
-    main()
+    run()
