@@ -1,167 +1,67 @@
-from google.cloud import storage
-import csv
-import io
+def process(self, element):
+    import psycopg2
+    from psycopg2 import sql, errors
+    from datetime import datetime
+    import apache_beam as beam
+    from apache_beam.io.gcp.gcsio import GcsIO
 
-def import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
-from google.cloud import bigquery
-import psycopg2
+    # Initialize GCSIO
+    gcsio = GcsIO()
 
-# Define pipeline options
-options = PipelineOptions()
-gcp_options = options.view_as(GoogleCloudOptions)
-gcp_options.project = 'your-gcp-project-id'  # Replace with your GCP project ID
-gcp_options.region = 'your-region'  # Replace with your GCP region
-gcp_options.job_name = 'temp-bq-to-postgres-job'
-gcp_options.staging_location = 'gs://your-bucket/staging'  # Replace with your GCS bucket
-gcp_options.temp_location = 'gs://your-bucket/temp'  # Replace with your GCS bucket
-options.view_as(GoogleCloudOptions).runner = 'DataflowRunner'  # Use DataflowRunner for GCP
+    # Read the update SQL template if provided
+    if self.update_pgs_path:
+        with gcsio.open(self.update_pgs_path, 'r') as file:
+            update_sql_content = file.read().decode('utf-8')
+            logging.info(f"Reading SQL File: {update_sql_content}")
 
-# PostgreSQL connection parameters
-pg_conn_params = {
-    'dbname': 'your_dbname',
-    'user': 'your_username',
-    'password': 'your_password',
-    'host': 'your_postgres_host',
-    'port': 5432
-}
+    # Extract columns and values from the element
+    columns = element.keys()
+    logging.info(f"Reading all columns of table: {columns}")
 
-# SQL queries
-create_temp_table_sql = """
-CREATE TEMPORARY TABLE temp_table1 AS (
-    SELECT * FROM your_source_table1 WHERE <conditions>
-);
-CREATE TEMPORARY TABLE temp_table2 AS (
-    SELECT * FROM your_source_table2 WHERE <conditions>
-);
-"""
+    values = [element[column] for column in columns if column != 'CUSTOMER_ID']
+    logging.info(f"Reading all values of table: {values}")
 
-join_query = """
-SELECT t1.*, t2.*
-FROM temp_table1 t1
-JOIN temp_table2 t2 ON t1.id = t2.id
-"""
+    # Construct the SET clause by excluding 'CUSTOMER_ID'
+    exclude_columns = ['CUSTOMER_ID']
+    set_columns = ', '.join([f"{col} = %s" for col in columns if col not in exclude_columns])
+    logging.info(f"SET clause: {set_columns}")
 
-# Function to create temporary tables in BigQuery
-def create_temp_tables_in_bq():
-    client = bigquery.Client()
-    client.query(create_temp_table_sql).result()  # Execute the SQL to create temp tables
+    # Construct the WHERE clause using 'CUSTOMER_ID'
+    condition_columns = ['CUSTOMER_ID']
+    where_clause = ' AND '.join([f"{col} = %s" for col in condition_columns])
+    logging.info(f"WHERE clause: {where_clause}")
 
-# Function to load data into PostgreSQL
-def load_data_to_postgres(data):
-    conn = psycopg2.connect(**pg_conn_params)
-    cur = conn.cursor()
-    
-    # Insert data into PostgreSQL table
-    insert_query = "INSERT INTO your_postgres_table (columns...) VALUES %s"  # Customize your insert query
+    # Add 'CUSTOMER_ID' to the list of values for the WHERE clause
+    values.append(element['CUSTOMER_ID'])
 
     try:
-        cur.execute(insert_query, data)  # Modify this as needed for the data format
-        conn.commit()
-        print("Data loaded successfully into PostgreSQL.")
-    except Exception as e:
-        print(f"Error loading data: {e}")
-    finally:
-        cur.close()
-        conn.close()
+        logging.info("Inside Try Block")
+        # Format the update query
+        update_query = update_sql_content.format(set_columns=set_columns, where_clause=where_clause)
+        logging.info(f"Update table query: {update_query}")
 
-# Function to drop temporary tables in BigQuery
-def drop_temp_tables():
-    client = bigquery.Client()
-    client.query("DROP TABLE IF EXISTS temp_table1, temp_table2").result()
+        # Execute the update query
+        self.cursor.execute(update_query, values)
+        self.conn.commit()
+        logging.info("Updating table...")
 
-# Apache Beam pipeline to manage the flow
-def run():
-    with beam.Pipeline(options=options) as p:
-        # Create temporary tables in BigQuery
-        create_temp_tables = (p
-            | 'Start Process' >> beam.Create([1])  # Dummy element to trigger process
-            | 'Create Temp Tables' >> beam.Map(lambda x: create_temp_tables_in_bq())
-        )
+        # Insert status update
+        status_query = """
+        INSERT INTO public.insert_status (STATUS, Insert_Date, bq_path, error_message)
+        VALUES (%s, %s, %s, %s)
+        """
+        self.cursor.execute(status_query, ('Update Success', datetime.now(), self.bq_path, 'Null'))
+        logging.info("Data Updated in status table")
+        self.conn.commit()
 
-        # Load data into PostgreSQL
-        loaded_data = (p
-            | 'Join and Load Data' >> beam.Map(lambda x: load_data_to_postgres(join_query))
-        )
+    except psycopg2.Error as e:
+        logging.error(f"psycopg2 Error Occurred: {str(e)}")
+        self.conn.rollback()
 
-        # Drop temporary tables after loading
-        (loaded_data
-            | 'Drop Temp Tables' >> beam.Map(lambda _: drop_temp_tables())
-        )
-
-if __name__ == '__main__':
-    run(), folder_path):
-    """
-    Lists files in the GCS folder and returns the latest CSV file.
-    
-    :param bucket_name: Name of the GCS bucket.
-    :param folder_path: Path to the folder in the GCS bucket.
-    :return: The path to the latest CSV file in the folder.
-    """
-    # Initialize a GCS client
-    client = storage.Client()
-    
-    # Get the bucket
-    bucket = client.bucket(bucket_name)
-    
-    # List all the blobs in the folder
-    blobs = bucket.list_blobs(prefix=folder_path)
-    
-    # Filter CSV files from the folder
-    csv_files = [blob.name for blob in blobs if blob.name.endswith('.csv')]
-    
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files found in the folder {folder_path}")
-
-    # For now, we just return the first CSV file
-    latest_csv = csv_files[0]
-    
-    return latest_csv
-
-def read_gcs_csv_to_dict(bucket_name, blob_name):
-    """
-    Reads a CSV file from GCS and converts each row into a dictionary.
-    
-    :param bucket_name: Name of the GCS bucket.
-    :param blob_name: Path to the CSV file in the GCS bucket.
-    :return: List of dictionaries with column names as keys.
-    """
-    # Initialize a GCS client
-    client = storage.Client()
-    
-    # Get the bucket and the blob (file)
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-
-    # Download the blob's content as a string
-    csv_data = blob.download_as_text()
-
-    # Read the CSV from the string data
-    data = []
-    csv_reader = csv.DictReader(io.StringIO(csv_data))
-
-    # Iterate over each row and store it as a dictionary
-    for row in csv_reader:
-        data.append(row)
-
-    return data
-
-def run(argv=None):
-    # GCS bucket and folder path
-    bucket_name = 'your-gcs-bucket'
-    folder_path = 'ns_pega_etl/output/'
-    
-    # Get the latest CSV file in the folder dynamically
-    csv_blob_path = get_latest_csv_file_from_gcs(bucket_name, folder_path)
-    
-    print(f"Latest CSV file: {csv_blob_path}")
-    
-    # Read the CSV file from GCS and convert it to a list of dictionaries
-    result_dicts = read_gcs_csv_to_dict(bucket_name, csv_blob_path)
-    
-    # Print the result to verify
-    for result in result_dicts:
-        print(result)
-
-if __name__ == '__main__':
-    run()
+        # Insert failure status update
+        status_query = """
+        INSERT INTO public.insert_status (STATUS, Insert_Date, bq_path, error_message)
+        VALUES (%s, %s, %s, %s)
+        """
+        self.cursor.execute(status_query, ('Update Failure', datetime.now(), self.bq_path, str(e)))
+        self.conn.commit()
