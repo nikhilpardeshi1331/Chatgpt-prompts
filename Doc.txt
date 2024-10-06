@@ -124,6 +124,11 @@ Final data load into Cloud SQL PostgreSQL tables.
 
 Data is now ready for reporting, analysis, and business intelligence activities.
 
+This document details the ETL (Extract, Transform, Load) process created for the HSBC project. The ETL process is essential for data integration, ensuring that data is accurately extracted from multiple source systems, transformed based on defined business rules, and then loaded into a target data warehouse for reporting, analysis, and decision-making. It is designed for data engineers, analysts, and other stakeholders responsible for maintaining, updating, or troubleshooting the ETL pipeline.
+
+
+
+
 
 
 
