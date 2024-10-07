@@ -1,50 +1,22 @@
-ETL Process Flow Runbook
-
-Created by: Nithya Manivannan
-Last modified by: Siddhant Shivam on Oct 04, 2024
-CHG3944713
-
-
----
+Pega ETL Process Flow Runbook
 
 Introduction
 
-This documentation outlines the ETL (Extract, Transform, Load) process developed for the HSBC project. The ETL process plays a crucial role in data integration by ensuring that data is accurately extracted from various source systems, transformed according to predefined business rules, and loaded into a target data warehouse for reporting, analysis, and decision-making. This guide is intended for data engineers, analysts, and other stakeholders involved in maintaining, updating, or troubleshooting the ETL pipeline.
-
-
----
+This document outlines the Pega ETL (Extract, Transform, Load) process created for the HSBC project. The ETL process is critical for seamless data integration, ensuring accurate extraction from various source systems, transformation based on predefined business rules, and loading into a target data warehouse for reporting, analysis, and decision-making. It is intended for data engineers, analysts, and other stakeholders responsible for managing, updating, or troubleshooting the ETL pipeline.
 
 Purpose
 
-The purpose of this documentation is to provide a comprehensive guide to the ETL process implemented for the HSBC project. It details the steps and procedures necessary to ensure:
-
-Data accuracy
-
-Scalability
-
-Compliance with HSBC's internal data governance policies and external regulations.
-
-
-
----
+The purpose of this document is to serve as a comprehensive guide to the ETL process implemented in the HSBC project. It details the procedures required to maintain data accuracy, scalability, and compliance with HSBC's internal data governance standards and external regulations.
 
 Objective
 
-1. Data Accuracy
-Ensure that data extraction from source systems maintains the integrity of the data throughout the ETL process, minimizing errors and inconsistencies.
+Data Accuracy: Ensure that data extraction from source systems maintains integrity throughout the ETL process, minimizing errors and inconsistencies.
 
+Transformation Logic: Apply business rules and data transformation logic tailored to meet HSBC's reporting requirements, ensuring proper formatting for analysis.
 
-2. Transformation Logic
-Apply business rules and data transformation logic tailored to meet HSBC's specific reporting requirements, ensuring the data is formatted correctly for final usage.
+Scalability: Design the ETL process to handle increasing data volumes as the project scales, optimizing performance at every stage.
 
-
-3. Scalability
-Design the ETL process to efficiently handle increasing data volumes as the project scales, optimizing performance at every stage.
-
-
-4. Compliance
-Adhere to HSBC's data governance and security standards throughout the ETL process, ensuring compliance with all relevant internal and external regulations.
-
+Compliance: Ensure the ETL process adheres to HSBC's data governance and security standards, complying with both internal and external regulations.
 
 
 
@@ -52,47 +24,66 @@ Adhere to HSBC's data governance and security standards throughout the ETL proce
 
 Detailed ETL Steps
 
-Step 1: Creating BigQuery (BQ) Scripts
+Step 1: Attribute-based BigQuery Script Creation
 
-Objective:
-Create temporary tables to manage data before final loading into the production tables. This step ensures that data is staged and processed in an organized manner.
-
-Action:
-Implement three BQ Scripts for a Slowly Changing Dimension Type 2 (SCD2) process: TEMPI_LOAD, TEMP2_LOAD, and TEMP3_LOAD. These temporary tables are created in the RDL (Raw Data Layer) source table environment and act as staging areas for the data before further processing.
-
-
-Step 2: Dataflow Pipeline for Lift and Shift
-
-Objective:
-Facilitate the movement of data from BigQuery to PostgreSQL for lift-and-shift operations.
+Objective: The process begins by receiving a requirement sheet from the business team that outlines the necessary data attributes. Based on these requirements, BigQuery (BQ) insert scripts are created to manage the data extraction from BigQuery.
 
 Action:
-Use a Google Dataflow pipeline to extract data from BigQuery and load it into PostgreSQL staging tables in the Cloud SQL PostgreSQL instance. This process ensures data is moved from the staging table to the final table for further reporting and analysis.
 
-Extract data from BigQuery source tables.
+1. Create BQ Insert Scripts: Build BQ insert scripts based on the business requirements for attribute-based data extraction.
 
-Load data into PostgreSQL staging tables.
 
-Once staging is complete, move the data from staging to final Cloud SQL PostgreSQL tables.
+2. Create Update Scripts: Some tables require updates after the initial insert; create corresponding BQ update scripts to handle these changes after the records have been inserted.
+
+
+3. Insert into PostgreSQL: These scripts are then used in the Dataflow pipeline to load the extracted data into PostgreSQL staging tables.
+
+
+
+
+Step 2: Dataflow Pipeline for Lift-and-Shift Operations
+
+Objective: Facilitate the movement of data from BigQuery to PostgreSQL, performing a lift-and-shift operation at the attribute level.
+
+Action:
+
+1. Extract from BigQuery: Data is extracted from BigQuery based on the insert scripts.
+
+
+2. Load into PostgreSQL Staging Tables: Dataflow moves the data into PostgreSQL staging tables, enabling further processing.
+
+
+3. Transfer from Staging to Final Table: Once the data is staged, it is transferred from the PostgreSQL staging tables to the final tables in the Cloud SQL PostgreSQL instance.
+
 
 
 
 Step 3: Data Transformation and Validation
 
-Objective:
-Ensure that the data is transformed according to predefined business rules before loading it into production tables.
+Objective: Ensure that the extracted data is transformed and validated before being loaded into the production tables.
 
 Action:
-Transform data based on the business logic, apply validation checks, and cleanse the data to ensure quality and integrity.
+
+1. Apply Business Logic: Transform data according to the predefined business rules.
+
+
+2. Validate and Cleanse Data: Perform validation checks and data cleansing to ensure accuracy and consistency.
+
+
 
 
 Step 4: Loading Data into Final Tables
 
-Objective:
-Safely move the transformed and validated data into the final tables in PostgreSQL.
+Objective: Finalize the data load by transferring the transformed data from the staging tables to the final tables in PostgreSQL.
 
 Action:
-Perform data migration from the staging tables to the final Cloud SQL PostgreSQL tables, ensuring that all validations have been met. This step finalizes the ETL process by ensuring data is ready for analysis and reporting.
+
+1. Move Data from Staging to Final Tables: Once the data is validated, it is loaded into the final Cloud SQL PostgreSQL tables.
+
+
+2. Truncate Staging Tables: After the data is successfully loaded into the final tables, the staging tables are truncated to clear any temporary data.
+
+
 
 
 
@@ -100,37 +91,78 @@ Perform data migration from the staging tables to the final Cloud SQL PostgreSQL
 
 ETL Workflow
 
-1. Extract Phase
+1. Extract Phase:
 
-Extract raw data from BigQuery.
+Extract raw data from BigQuery using the BQ scripts created based on the requirement sheet.
 
-Load it into the staging tables in PostgreSQL.
-
-
-
-2. Transform Phase
-
-Apply SCD2 logic for tracking historical changes.
-
-Validate and cleanse data.
-
-Move transformed data from staging to final production tables.
+Load the extracted data into PostgreSQL staging tables.
 
 
 
-3. Load Phase
+2. Transform Phase:
 
-Final data load into Cloud SQL PostgreSQL tables.
+Apply business rules and transformation logic.
 
-Data is now ready for reporting, analysis, and business intelligence activities.
+Validate and cleanse the data before loading it into the final PostgreSQL tables.
 
-This document details the ETL (Extract, Transform, Load) process created for the HSBC project. The ETL process is essential for data integration, ensuring that data is accurately extracted from multiple source systems, transformed based on defined business rules, and then loaded into a target data warehouse for reporting, analysis, and decision-making. It is designed for data engineers, analysts, and other stakeholders responsible for maintaining, updating, or troubleshooting the ETL pipeline.
+
+
+3. Load Phase:
+
+Transfer the transformed data from the staging tables into the final Cloud SQL PostgreSQL tables.
+
+Truncate staging tables after successful data load.
 
 
 
 
 
+---
+
+Dataflow Process Overview
+
+The dataflow process is divided into three key stages:
+
+1. Data Extraction and Staging:
+
+A Dataflow job is used to extract data from BigQuery based on the insert scripts and load it into the PostgreSQL staging tables. The pipeline also interacts with a configuration table to manage the status of the load.
+
+
+Configuration Table:
+
+Contains columns such as unique_num, table_name, bq_script_path, load_type (insert/update), and status (open/closed).
+
+The table tracks the status of the data load process, helping in the smooth execution of the pipeline.
 
 
 
+2. Re-Open Configuration Table:
+
+After data is successfully loaded into the final table, the configuration table is updated to mark the status as OPEN, making it ready for the next operation cycle.
+
+
+
+3. Final Data Load:
+
+The dataflow pipeline transfers data from the staging tables to the final PostgreSQL tables.
+
+After the final load, the staging tables are cleared to prepare for future loads.
+
+
+
+
+
+---
+
+Testing and Validation
+
+After data is loaded into PostgreSQL, thorough testing is performed to ensure that the data has been populated correctly.
+
+Data validation checks are run to ensure that all records are accurate and comply with the business logic and transformation rules.
+
+
+
+---
+
+This structured approach ensures that the Pega ETL process is efficient, scalable, and aligned with HSBC's data governance and compliance standards. Let me know if you need any further adjustments or additions.
 
