@@ -1,67 +1,109 @@
-def process(self, element):
-    import psycopg2
-    from psycopg2 import sql, errors
-    from datetime import datetime
-    import apache_beam as beam
-    from apache_beam.io.gcp.gcsio import GcsIO
+import airflow
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from datetime import datetime, timedelta
+import configparser
+import io
+import logging
+import os
+import sys
+from google.cloud import storage
+from google.cloud import bigquery
 
-    # Initialize GCSIO
-    gcsio = GcsIO()
+# Default arguments for the DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2023, 1, 1),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
 
-    # Read the update SQL template if provided
-    if self.update_pgs_path:
-        with gcsio.open(self.update_pgs_path, 'r') as file:
-            update_sql_content = file.read().decode('utf-8')
-            logging.info(f"Reading SQL File: {update_sql_content}")
+# Define the DAG
+dag = DAG(
+    'gcs_to_bq_load',
+    default_args=default_args,
+    description='A DAG to load data from GCS to BigQuery',
+    schedule_interval=timedelta(days=1),
+)
 
-    # Extract columns and values from the element
-    columns = element.keys()
-    logging.info(f"Reading all columns of table: {columns}")
+def load_from_gcs(file_path_full):
+    logging.info(f"Reading config file from bucket {file_path_full}")
+    print(f"Reading config file from bucket {file_path_full}")
+    
+    if file_path_full.startswith('gs://'):
+        path_parts = file_path_full[5:].split('/', 1)
+        bucket_name = path_parts[0]
+        file_path = path_parts[1]
+        logging.info(f"Reading config file from bucket: gs://{bucket_name}/{file_path}")
+        print(f"Reading config file from bucket: gs://{bucket_name}/{file_path}")
+        return bucket_name, file_path
+    else:
+        raise ValueError("Invalid GCS path provided")
 
-    values = [element[column] for column in columns if column != 'CUSTOMER_ID']
-    logging.info(f"Reading all values of table: {values}")
+def load_config(bucket_name, file_path):
+    """Load configuration from a file."""
+    client = storage.Client()
+    bucket_obj = client.bucket(bucket_name)
+    blob_obj = bucket_obj.blob(file_path)
+    config_content = blob_obj.download_as_text()
 
-    # Construct the SET clause by excluding 'CUSTOMER_ID'
-    exclude_columns = ['CUSTOMER_ID']
-    set_columns = ', '.join([f"{col} = %s" for col in columns if col not in exclude_columns])
-    logging.info(f"SET clause: {set_columns}")
+    config = configparser.ConfigParser()
+    config.read_file(io.StringIO(config_content))
+    print(f"sections: {config.sections()}")
+    return config
 
-    # Construct the WHERE clause using 'CUSTOMER_ID'
-    condition_columns = ['CUSTOMER_ID']
-    where_clause = ' AND '.join([f"{col} = %s" for col in condition_columns])
-    logging.info(f"WHERE clause: {where_clause}")
+def run_script(config_path):
+    # Load the configuration file from GCS
+    config_file_bucket_name, config_file_path = load_from_gcs(config_path)
+    config = load_config(config_file_bucket_name, config_file_path)
 
-    # Add 'CUSTOMER_ID' to the list of values for the WHERE clause
-    values.append(element['CUSTOMER_ID'])
+    # Get values from config
+    project_id = config.get('GSC_BQ_LOAD', 'project_id')
+    dataset_id = config.get('GSC_BQ_LOAD', 'dataset_id')
+    table_id = config.get('GSC_BQ_LOAD', 'table_id')
+    file_path = config.get('GSC_BQ_LOAD', 'file_path')
 
-    try:
-        logging.info("Inside Try Block")
-        # Format the update query
-        update_query = update_sql_content.format(set_columns=set_columns, where_clause=where_clause)
-        logging.info(f"Update table query: {update_query}")
+    # Load file path from GCS
+    bucket_name, file_path = load_from_gcs(file_path)
 
-        # Execute the update query
-        self.cursor.execute(update_query, values)
-        self.conn.commit()
-        logging.info("Updating table...")
+    # Create a BigQuery client
+    bq_client = bigquery.Client()
 
-        # Insert status update
-        status_query = """
-        INSERT INTO public.insert_status (STATUS, Insert_Date, bq_path, error_message)
-        VALUES (%s, %s, %s, %s)
-        """
-        self.cursor.execute(status_query, ('Update Success', datetime.now(), self.bq_path, 'Null'))
-        logging.info("Data Updated in status table")
-        self.conn.commit()
+    # Set job configuration for BigQuery
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        autodetect=True,
+        skip_leading_rows=1
+    )
 
-    except psycopg2.Error as e:
-        logging.error(f"psycopg2 Error Occurred: {str(e)}")
-        self.conn.rollback()
+    # Full GCS path for the file
+    gcs_path = f"gs://{bucket_name}/{file_path}"
 
-        # Insert failure status update
-        status_query = """
-        INSERT INTO public.insert_status (STATUS, Insert_Date, bq_path, error_message)
-        VALUES (%s, %s, %s, %s)
-        """
-        self.cursor.execute(status_query, ('Update Failure', datetime.now(), self.bq_path, str(e)))
-        self.conn.commit()
+    # Load the data into BigQuery
+    print(f"creating BQ job")
+    load_job = bq_client.load_table_from_uri(gcs_path, f"{project_id}.{dataset_id}.{table_id}", job_config=job_config)
+    
+    # Wait for the job to complete
+    load_job.result()
+
+    # Fetch the loaded table and print the number of rows
+    table = bq_client.get_table(f"{project_id}.{dataset_id}.{table_id}")
+    print(f"**** {table.num_rows} rows loaded")
+
+def task_run_script(**kwargs):
+    config_path = kwargs['config_path']
+    run_script(config_path)
+
+# Define the PythonOperator for the DAG
+run_script_task = PythonOperator(
+    task_id='run_gcs_to_bq_load_script',
+    python_callable=task_run_script,
+    op_kwargs={'config_path': 'gs://your-bucket-path/config_file.cfg'},  # Update with your GCS path
+    dag=dag,
+)
+
+# Set the task in the DAG
+run_script_task
