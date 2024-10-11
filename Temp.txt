@@ -1,109 +1,88 @@
-import airflow
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
-from datetime import datetime, timedelta
+from datetime import datetime
 import configparser
 import io
 import logging
 import os
 import sys
-from google.cloud import storage
-from google.cloud import bigquery
+from google.cloud import storage, bigquery
+from google.oauth2 import service_account
 
-# Default arguments for the DAG
+# Define your default_args for the DAG
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2023, 1, 1),
+    'start_date': datetime(2024, 10, 10),
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retries': 1
 }
 
-# Define the DAG
-dag = DAG(
-    'gcs_to_bq_load',
+# Initialize the DAG
+with DAG(
+    dag_id='gcs_to_bq_load_dag',
     default_args=default_args,
     description='A DAG to load data from GCS to BigQuery',
-    schedule_interval=timedelta(days=1),
-)
+    schedule_interval='@daily',  # Can be changed as per requirement
+    catchup=False,
+) as dag:
 
-def load_from_gcs(file_path_full):
-    logging.info(f"Reading config file from bucket {file_path_full}")
-    print(f"Reading config file from bucket {file_path_full}")
-    
-    if file_path_full.startswith('gs://'):
-        path_parts = file_path_full[5:].split('/', 1)
-        bucket_name = path_parts[0]
-        file_path = path_parts[1]
-        logging.info(f"Reading config file from bucket: gs://{bucket_name}/{file_path}")
-        print(f"Reading config file from bucket: gs://{bucket_name}/{file_path}")
-        return bucket_name, file_path
-    else:
-        raise ValueError("Invalid GCS path provided")
+    def load_from_gcs(file_path_full):
+        logging.info(f"Reading config file from bucket {file_path_full}")
+        if file_path_full.startswith('gs://'):
+            path_parts = file_path_full[5:].split('/', 1)
+            bucket_name = path_parts[0]
+            file_path = path_parts[1]
+            logging.info(f"Reading config file from bucket: gs://{bucket_name}/{file_path}")
+            return bucket_name, file_path
+        return None, None
 
-def load_config(bucket_name, file_path):
-    """Load configuration from a file."""
-    client = storage.Client()
-    bucket_obj = client.bucket(bucket_name)
-    blob_obj = bucket_obj.blob(file_path)
-    config_content = blob_obj.download_as_text()
+    def load_config(bucket_name, file_path):
+        """Load configuration from a file stored in GCS."""
+        client = storage.Client()
+        bucket_obj = client.bucket(bucket_name)
+        blob_obj = bucket_obj.blob(file_path)
+        config_content = blob_obj.download_as_text()
+        config = configparser.ConfigParser()
+        config.read_file(io.StringIO(config_content))
+        logging.info(f"Config sections: {config.sections()}")
+        return config
 
-    config = configparser.ConfigParser()
-    config.read_file(io.StringIO(config_content))
-    print(f"sections: {config.sections()}")
-    return config
+    def run_script(config_path):
+        # Step 1: Load the configuration from GCS
+        config_file_bucket_name, config_file_path = load_from_gcs(config_path)
+        config = load_config(config_file_bucket_name, config_file_path)
+        
+        # Step 2: Extract values from config
+        project_id = config.get('GSC_BQ_LOAD', 'project_id')
+        dataset_id = config.get('GSC_BQ_LOAD', 'dataset_id')
+        table_id = config.get('GSC_BQ_LOAD', 'table_id')
+        file_path = config.get('GSC_BQ_LOAD', 'file_path')
+        
+        # Load the file path from GCS
+        bucket_name, file_path = load_from_gcs(file_path)
+        
+        # Step 3: Load data into BigQuery
+        bq_client = bigquery.Client()
+        job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.CSV,
+            autodetect=True,
+            skip_leading_rows=1
+        )
+        path = f"gs://{bucket_name}/{file_path}"
+        logging.info(f"Starting BQ load job for {path}")
+        load_job = bq_client.load_table_from_uri(path, f"{project_id}.{dataset_id}.{table_id}", job_config=job_config)
+        load_job.result()  # Wait for the job to complete
+        table = bq_client.get_table(f"{project_id}.{dataset_id}.{table_id}")
+        logging.info(f"Table {table_id} loaded with {table.num_rows} rows")
 
-def run_script(config_path):
-    # Load the configuration file from GCS
-    config_file_bucket_name, config_file_path = load_from_gcs(config_path)
-    config = load_config(config_file_bucket_name, config_file_path)
-
-    # Get values from config
-    project_id = config.get('GSC_BQ_LOAD', 'project_id')
-    dataset_id = config.get('GSC_BQ_LOAD', 'dataset_id')
-    table_id = config.get('GSC_BQ_LOAD', 'table_id')
-    file_path = config.get('GSC_BQ_LOAD', 'file_path')
-
-    # Load file path from GCS
-    bucket_name, file_path = load_from_gcs(file_path)
-
-    # Create a BigQuery client
-    bq_client = bigquery.Client()
-
-    # Set job configuration for BigQuery
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.CSV,
-        autodetect=True,
-        skip_leading_rows=1
+    # Task to run the script
+    run_task = PythonOperator(
+        task_id='run_gcs_to_bq_load',
+        python_callable=run_script,
+        op_args=['gs://your-bucket-name/path-to-config-file.cfg'],  # Replace with actual GCS path
+        dag=dag,
     )
 
-    # Full GCS path for the file
-    gcs_path = f"gs://{bucket_name}/{file_path}"
-
-    # Load the data into BigQuery
-    print(f"creating BQ job")
-    load_job = bq_client.load_table_from_uri(gcs_path, f"{project_id}.{dataset_id}.{table_id}", job_config=job_config)
-    
-    # Wait for the job to complete
-    load_job.result()
-
-    # Fetch the loaded table and print the number of rows
-    table = bq_client.get_table(f"{project_id}.{dataset_id}.{table_id}")
-    print(f"**** {table.num_rows} rows loaded")
-
-def task_run_script(**kwargs):
-    config_path = kwargs['config_path']
-    run_script(config_path)
-
-# Define the PythonOperator for the DAG
-run_script_task = PythonOperator(
-    task_id='run_gcs_to_bq_load_script',
-    python_callable=task_run_script,
-    op_kwargs={'config_path': 'gs://your-bucket-path/config_file.cfg'},  # Update with your GCS path
-    dag=dag,
-)
-
-# Set the task in the DAG
-run_script_task
+    run_task
