@@ -1,48 +1,80 @@
-import configparser
-import io
-import logging
-from google.cloud import bigquery, storage
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+from airflow.providers.google.cloud.sensors.gcs import GCSObjectExistenceSensor
+from airflow.providers.postgres.transfers.bigquery_to_postgres import BigQueryToPostgresOperator
+from datetime import datetime
 
-def load_config(bucket_name, file_path):
-    """Load configuration from GCS."""
-    client = storage.Client()
-    bucket_obj = client.bucket(bucket_name)
-    blob_obj = bucket_obj.blob(file_path)
-    config_content = blob_obj.download_as_text()
+# Define the DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 10, 10),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+}
+
+with DAG(
+    dag_id='gcs_to_bq_load_dag',
+    default_args=default_args,
+    schedule_interval=None,
+    catchup=False,
+) as dag:
+
+    bucket_name = 'your-bucket-name'
+    source_objects_name = 'path/to/your/csv/file.csv'
+    object_ctl_file_path = 'path/to/your/ctl/file.ctl'
+    destination_table = 'your_project.your_dataset.your_table'
     
-    config = configparser.ConfigParser()
-    config.read_file(io.StringIO(config_content))
-    logging.info(f"Config sections: {config.sections()}")
-    return config
-
-def load_data_into_bq(config_path):
-    """Load data from GCS to BigQuery."""
-    config = load_config(config_path['bucket'], config_path['file_path'])
-    
-    project_id = config.get('GSC_BQ_LOAD', 'project_id')
-    dataset_id = config.get('GSC_BQ_LOAD', 'dataset_id')
-    table_id = config.get('GSC_BQ_LOAD', 'table_id')
-    file_path = config.get('GSC_BQ_LOAD', 'file_path')
-
-    # GCS to BQ
-    client = bigquery.Client()
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.CSV,
-        autodetect=True,
-        skip_leading_rows=1,
+    # Sensor for CSV file
+    wait_for_csv_file = GCSObjectExistenceSensor(
+        task_id='wait_for_csv_file',
+        bucket=bucket_name,
+        object=source_objects_name,
+        timeout=600,
+        poke_interval=30,
     )
-    
-    uri = f"gs://{config_path['bucket']}/{file_path}"
-    load_job = client.load_table_from_uri(uri, f"{project_id}.{dataset_id}.{table_id}", job_config=job_config)
-    load_job.result()  # Wait for job to complete
 
-    table = client.get_table(f"{project_id}.{dataset_id}.{table_id}")
-    logging.info(f"Loaded {table.num_rows} rows into {table_id}")
+    # Sensor for CTL file
+    wait_for_ctl_file = GCSObjectExistenceSensor(
+        task_id='wait_for_ctl_file',
+        bucket=bucket_name,
+        object=object_ctl_file_path,
+        timeout=600,
+        poke_interval=30,
+    )
 
-if __name__ == "__main__":
-    bucket_name = 'my-bucket'
-    config_path = {
-        'bucket': bucket_name,
-        'file_path': 'path-to-config-file.cfg',
-    }
-    load_data_into_bq(config_path)
+    # Task to call external Python script for GCS to BQ loading
+    load_gcs_to_bq = BashOperator(
+        task_id='load_gcs_to_bq',
+        bash_command=f'python3 /path/to/load_gcs_to_bq.py',  # Adjust the path
+    )
+
+    # Load data into BigQuery
+    load_data_pega_aar = GCSToBigQueryOperator(
+        task_id='load_gcs_to_bq_operator',
+        gcp_conn_id='gcp_connection',
+        bucket=bucket_name,
+        source_objects=source_objects_name,
+        destination_project_dataset_table=destination_table,
+        autodetect=True,
+        source_format='CSV',
+        field_delimiter=',',  # Adjust delimiter if needed
+        max_bad_records=1000,
+        ignore_unknown_values=True,
+        write_disposition='WRITE_TRUNCATE',
+    )
+
+    # Transfer data to PostgreSQL
+    transfer_to_postgres = BigQueryToPostgresOperator(
+        task_id='transfer_bq_to_pg',
+        gcp_conn_id='gcp_connection',
+        dataset_table=f'{destination_table}',
+        postgres_conn_id='postgres_connection_id',
+        target_table_name='your_postgres_table',
+        replace=False,
+    )
+
+    # Task dependencies
+    wait_for_csv_file >> wait_for_ctl_file >> load_gcs_to_bq >> load_data_pega_aar >> transfer_to_postgres
