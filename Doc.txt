@@ -1,13 +1,231 @@
-This DAG (gcs_to_bq_load_dag) is designed to load data from a file in Google Cloud Storage (GCS) into a BigQuery table. Below is a brief overview of the components and workflow of the DAG:
+Step 3: Creating Script to Load Files from Google Cloud Storage (GCS) to Google BigQuery
 
-1. Purpose
+Objective: Load SAS files stored in a Google Cloud Storage (GCS) bucket into a BigQuery table. This process involves reading the data from GCS, transforming it as needed, and then loading it into the specified BigQuery table.
 
-The DAG performs the following:
+Key Components:
 
-Reads a configuration file from GCS.
+1. Google Cloud SDK and Python Setup:
 
-Extracts necessary details like project_id, dataset_id, table_id, and the file_path from this configuration.
+Install the required libraries:
 
-Loads a CSV file stored in GCS into a specified BigQuery table.
+pip install google-cloud-storage google-cloud-bigquery pandas pyreadstat
 
-Includes dummy tasks to define the start and end of the process.
+These libraries will allow you to interact with GCS, BigQuery, and read SAS files.
+
+
+
+2. Loading SAS Files from GCS:
+
+First, set up authentication to access GCS and BigQuery by exporting your credentials:
+
+export GOOGLE_APPLICATION_CREDENTIALS="path_to_your_service_account.json"
+
+Use the following Python script to read SAS files from GCS and load them into BigQuery:
+
+from google.cloud import storage, bigquery
+import pandas as pd
+import pyreadstat
+
+# Initialize clients for GCS and BigQuery
+storage_client = storage.Client()
+bigquery_client = bigquery.Client()
+
+# Define GCS bucket and file details
+bucket_name = "your_gcs_bucket"
+sas_file_path = "path_to_your_sas_file.sas7bdat"
+dataset_id = "your_bigquery_dataset"
+table_id = "your_bigquery_table"
+
+def download_file_from_gcs(bucket_name, sas_file_path):
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(sas_file_path)
+    sas_local_file = "/tmp/" + sas_file_path.split("/")[-1]
+    blob.download_to_filename(sas_local_file)
+    return sas_local_file
+
+def load_sas_to_bigquery(sas_file_path, dataset_id, table_id):
+    # Download SAS file from GCS
+    sas_local_file = download_file_from_gcs(bucket_name, sas_file_path)
+
+    # Read the SAS file into a DataFrame
+    df, meta = pyreadstat.read_sas7bdat(sas_local_file)
+
+    # Load data into BigQuery
+    table_ref = bigquery_client.dataset(dataset_id).table(table_id)
+    job = bigquery_client.load_table_from_dataframe(df, table_ref)
+    job.result()  # Wait for the job to complete
+
+# Load SAS file into BigQuery
+load_sas_to_bigquery(sas_file_path, dataset_id, table_id)
+
+
+
+
+Key Considerations:
+
+SAS File Processing: Ensure that the SAS file format (.sas7bdat) is supported and correctly parsed by the pyreadstat library.
+
+BigQuery Schema: You can either predefine the schema of the BigQuery table or let BigQuery infer the schema based on the data type in the SAS file.
+
+
+
+---
+
+Step 4: Creating Script for Lifecycle Management
+
+Objective: Implement lifecycle management for Google Cloud Storage to automatically delete or archive files after a certain period or based on specific conditions.
+
+Key Components:
+
+1. Setting Up GCS Lifecycle Rules: GCS provides built-in lifecycle management to automatically handle file expiration, deletion, or archiving. This is managed via JSON configuration.
+
+Define a lifecycle rule to delete objects that are older than 30 days:
+
+{
+  "rule": [
+    {
+      "action": {
+        "type": "Delete"
+      },
+      "condition": {
+        "age": 30
+      }
+    }
+  ]
+}
+
+Apply the lifecycle rule to a GCS bucket:
+
+gsutil lifecycle set lifecycle_config.json gs://your_gcs_bucket
+
+
+
+2. Implementing in Python (if dynamic lifecycle management is needed): If you need to apply lifecycle rules programmatically, you can use the Python google-cloud-storage library to set or update lifecycle policies:
+
+from google.cloud import storage
+
+def set_lifecycle_policy(bucket_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+
+    lifecycle_rules = {
+        "rule": [
+            {
+                "action": {"type": "Delete"},
+                "condition": {"age": 30}
+            }
+        ]
+    }
+
+    bucket.lifecycle_rules = lifecycle_rules
+    bucket.patch()
+
+# Set lifecycle policy for your bucket
+set_lifecycle_policy("your_gcs_bucket")
+
+
+
+Key Considerations:
+
+GCS Charges: Be mindful of GCS storage costs. Automatically deleting files helps avoid excessive charges.
+
+Data Archiving: If you want to archive files instead of deleting them, you can set up Nearline or Coldline storage policies.
+
+
+
+---
+
+Step 5: Creating Airflow DAGs
+
+Objective: Create an Airflow DAG that automates the process of waiting for CSV files in GCS, processing them, and loading the data into BigQuery.
+
+Key Components:
+
+1. Airflow DAG Structure: An Airflow DAG (Directed Acyclic Graph) is a Python script that defines tasks and their execution order.
+
+
+2. DAG for CSV Processing:
+
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from airflow.providers.google.cloud.sensors.gcs import GCSObjectExistenceSensor
+from google.cloud import storage, bigquery
+import pandas as pd
+from datetime import datetime
+
+default_args = {
+    'owner': 'airflow',
+    'start_date': datetime(2023, 10, 14),
+    'retries': 1,
+}
+
+dag = DAG('gcs_to_bigquery_dag', default_args=default_args, schedule_interval='@daily', catchup=False)
+
+# Function to process and load CSV from GCS to BigQuery
+def process_csv(**kwargs):
+    # Initialize GCS and BigQuery clients
+    storage_client = storage.Client()
+    bigquery_client = bigquery.Client()
+
+    # GCS bucket and file details
+    bucket_name = kwargs['bucket_name']
+    csv_file_path = kwargs['csv_file_path']
+    dataset_id = kwargs['dataset_id']
+    table_id = kwargs['table_id']
+
+    # Download the CSV file from GCS
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(csv_file_path)
+    blob.download_to_filename('/tmp/temp.csv')
+
+    # Read the CSV file into a DataFrame
+    df = pd.read_csv('/tmp/temp.csv')
+
+    # Load the data into BigQuery
+    table_ref = bigquery_client.dataset(dataset_id).table(table_id)
+    job = bigquery_client.load_table_from_dataframe(df, table_ref)
+    job.result()  # Wait for the job to complete
+
+# Define the GCS sensor task to wait for the CSV file
+wait_for_csv = GCSObjectExistenceSensor(
+    task_id='wait_for_csv',
+    bucket='your_gcs_bucket',
+    object='path_to_your_csv_file.csv',
+    google_cloud_conn_id='google_cloud_default',
+    dag=dag
+)
+
+# Define the processing task
+process_task = PythonOperator(
+    task_id='process_csv',
+    python_callable=process_csv,
+    op_kwargs={
+        'bucket_name': 'your_gcs_bucket',
+        'csv_file_path': 'path_to_your_csv_file.csv',
+        'dataset_id': 'your_bigquery_dataset',
+        'table_id': 'your_bigquery_table'
+    },
+    dag=dag
+)
+
+# Define the DAG's execution order
+wait_for_csv >> process_task
+
+
+
+Key Components:
+
+GCSObjectExistenceSensor: This waits for the presence of a CSV file in a GCS bucket.
+
+PythonOperator: Once the file is detected, this operator triggers the processing logic (reading the CSV and loading it into BigQuery).
+
+
+Key Considerations:
+
+Error Handling: Ensure to handle errors or missing files with proper alerts or retries in Airflow.
+
+CSV Validation: Validate the structure of the CSV file before loading it into BigQuery.
+
+
+By combining these steps, you can automate the entire process from detecting files in GCS, loading them into BigQuery, managing GCS file lifecycles, and scheduling these tasks using Airflow DAGs.
+
