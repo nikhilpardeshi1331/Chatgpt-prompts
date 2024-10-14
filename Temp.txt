@@ -1,80 +1,47 @@
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
-from airflow.providers.google.cloud.sensors.gcs import GCSObjectExistenceSensor
-from airflow.providers.postgres.transfers.bigquery_to_postgres import BigQueryToPostgresOperator
+from airflow.utils.dates import days_ago
 from datetime import datetime
 
-# Define the DAG
+# Define default arguments for the DAG
 default_args = {
     'owner': 'airflow',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 10, 10),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
+    'start_date': days_ago(1),
+    'retries': 1
 }
 
-with DAG(
-    dag_id='gcs_to_bq_load_dag',
+# Define the DAG
+dag = DAG(
+    dag_id='NS_PEGA_PSQL',
     default_args=default_args,
-    schedule_interval=None,
     catchup=False,
-) as dag:
+    schedule_interval=None
+)
 
-    bucket_name = 'your-bucket-name'
-    source_objects_name = 'path/to/your/csv/file.csv'
-    object_ctl_file_path = 'path/to/your/ctl/file.ctl'
-    destination_table = 'your_project.your_dataset.your_table'
-    
-    # Sensor for CSV file
-    wait_for_csv_file = GCSObjectExistenceSensor(
-        task_id='wait_for_csv_file',
-        bucket=bucket_name,
-        object=source_objects_name,
-        timeout=600,
-        poke_interval=30,
-    )
+# Task 1: Create a temporary directory (this step is optional since we are using GCS for storage)
+PEGA_ETL_SRC_job3 = BashOperator(
+    task_id='PEGA_ETL_SRC_job3',
+    bash_command='mkdir -p /tmp/ns_pega_jobs',
+    dag=dag,
+)
 
-    # Sensor for CTL file
-    wait_for_ctl_file = GCSObjectExistenceSensor(
-        task_id='wait_for_ctl_file',
-        bucket=bucket_name,
-        object=object_ctl_file_path,
-        timeout=600,
-        poke_interval=30,
-    )
+# Task 2: Execute the psql command and store the output into a temporary file, then upload to GCS
+PEGA_ETL_SRC_job4 = BashOperator(
+    task_id='PEGA_ETL_SRC_job4',
+    bash_command=(
+        'psql -h 192.168.192.46 -U uat-sql-auth-proxy@hsbc-12453728-pegacdhhk-dev.iam -d dhkpr00023 -p 5432 '
+        '-c "select account_id from isshktal.aar_ns_sit limit 5" > /tmp/ns_logs.txt && '
+        'gsutil cp /tmp/ns_logs.txt gs://your-bucket/ns_pega_jobs/ns_logs.txt'
+    ),
+    dag=dag,
+)
 
-    # Task to call external Python script for GCS to BQ loading
-    load_gcs_to_bq = BashOperator(
-        task_id='load_gcs_to_bq',
-        bash_command=f'python3 /path/to/load_gcs_to_bq.py',  # Adjust the path
-    )
+# Task 3: Download and print the contents of the log file from GCS
+PEGA_ETL_SRC_job5 = BashOperator(
+    task_id='PEGA_ETL_SRC_job5',
+    bash_command='gsutil cat gs://your-bucket/ns_pega_jobs/ns_logs.txt',
+    dag=dag,
+)
 
-    # Load data into BigQuery
-    load_data_pega_aar = GCSToBigQueryOperator(
-        task_id='load_gcs_to_bq_operator',
-        gcp_conn_id='gcp_connection',
-        bucket=bucket_name,
-        source_objects=source_objects_name,
-        destination_project_dataset_table=destination_table,
-        autodetect=True,
-        source_format='CSV',
-        field_delimiter=',',  # Adjust delimiter if needed
-        max_bad_records=1000,
-        ignore_unknown_values=True,
-        write_disposition='WRITE_TRUNCATE',
-    )
-
-    # Transfer data to PostgreSQL
-    transfer_to_postgres = BigQueryToPostgresOperator(
-        task_id='transfer_bq_to_pg',
-        gcp_conn_id='gcp_connection',
-        dataset_table=f'{destination_table}',
-        postgres_conn_id='postgres_connection_id',
-        target_table_name='your_postgres_table',
-        replace=False,
-    )
-
-    # Task dependencies
-    wait_for_csv_file >> wait_for_ctl_file >> load_gcs_to_bq >> load_data_pega_aar >> transfer_to_postgres
+# Define task dependencies
+PEGA_ETL_SRC_job3 >> PEGA_ETL_SRC_job4 >> PEGA_ETL_SRC_job5
