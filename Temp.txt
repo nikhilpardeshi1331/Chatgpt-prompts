@@ -1,47 +1,50 @@
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.utils.dates import days_ago
-from datetime import datetime
+def process(self, element):
+    try:
+        # Extract columns from the element
+        columns = element.keys()
+        logging.info(f"Reading all columns of table: {columns}")
 
-# Define default arguments for the DAG
-default_args = {
-    'owner': 'airflow',
-    'start_date': days_ago(1),
-    'retries': 1
-}
+        # Exclude columns from the 'SET' clause
+        exclude_columns = ('CUSTOMER_ID', 'ACCOUNT_ID', 'CARD_NUM', 'LINK_CARD_NUM')
+        
+        # Extract the values for columns that are not excluded
+        values = [element[column] for column in columns if column not in exclude_columns]
+        logging.info(f"Reading all values of table: {values}")
 
-# Define the DAG
-dag = DAG(
-    dag_id='NS_PEGA_PSQL',
-    default_args=default_args,
-    catchup=False,
-    schedule_interval=None
-)
+        # Prepare the 'SET' clause by including only columns that are not excluded
+        set_columns = ', '.join([f"{col} = %s" for col in columns if col not in exclude_columns])
+        logging.info(f"Reading all set_columns of table: {set_columns}")
 
-# Task 1: Create a temporary directory (this step is optional since we are using GCS for storage)
-PEGA_ETL_SRC_job3 = BashOperator(
-    task_id='PEGA_ETL_SRC_job3',
-    bash_command='mkdir -p /tmp/ns_pega_jobs',
-    dag=dag,
-)
+        # Define condition columns for the 'WHERE' clause
+        condition_columns = ['CUSTOMER_ID', 'ACCOUNT_ID', 'CARD_NUM', 'LINK_CARD_NUM']
+        logging.info(f"Reading all condition_columns of table: {condition_columns}")
 
-# Task 2: Execute the psql command and store the output into a temporary file, then upload to GCS
-PEGA_ETL_SRC_job4 = BashOperator(
-    task_id='PEGA_ETL_SRC_job4',
-    bash_command=(
-        'psql -h 192.168.192.46 -U uat-sql-auth-proxy@hsbc-12453728-pegacdhhk-dev.iam -d dhkpr00023 -p 5432 '
-        '-c "select account_id from isshktal.aar_ns_sit limit 5" > /tmp/ns_logs.txt && '
-        'gsutil cp /tmp/ns_logs.txt gs://your-bucket/ns_pega_jobs/ns_logs.txt'
-    ),
-    dag=dag,
-)
+        # Prepare the 'WHERE' clause using the condition columns
+        where_clause = ' AND '.join([f"{col} = %s" for col in condition_columns])
+        logging.info(f"Reading all where_clause of table: {where_clause}")
 
-# Task 3: Download and print the contents of the log file from GCS
-PEGA_ETL_SRC_job5 = BashOperator(
-    task_id='PEGA_ETL_SRC_job5',
-    bash_command='gsutil cat gs://your-bucket/ns_pega_jobs/ns_logs.txt',
-    dag=dag,
-)
+        # Construct the final update query
+        update_query = f"""UPDATE {self.tgt_table_name} SET {set_columns} WHERE {where_clause}"""
+        logging.info(f"Update table query: {update_query}")
 
-# Define task dependencies
-PEGA_ETL_SRC_job3 >> PEGA_ETL_SRC_job4 >> PEGA_ETL_SRC_job5
+        # Extract values for the WHERE clause (condition columns)
+        where_values = [element[col] for col in condition_columns]
+
+        # Combine set values and where values for the query execution
+        all_values = values + where_values
+
+        # Execute the query with the provided values
+        self.cursor.execute(update_query, all_values)
+        logging.info("Updating table...")
+
+        # Commit the transaction
+        self.conn.commit()
+
+    except Exception as e:
+        logging.error("Failed to update data: %s", str(e))
+        self.conn.rollback()  # Rollback in case of an error
+        self.updateConfigTable(self.postgres_config, self.uniqueNum, 'FAILED')
+        logging.info("Updated PostgreSQL Config table after failed update operation")
+
+        # Optionally raise an error to halt execution
+        # raise RuntimeError(f"Update failed for {self.tgt_table_name}") from e
