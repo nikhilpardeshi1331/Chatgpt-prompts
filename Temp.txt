@@ -1,50 +1,108 @@
-def process(self, element):
-    try:
-        # Extract columns from the element
-        columns = element.keys()
-        logging.info(f"Reading all columns of table: {columns}")
+from airflow import DAG
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from datetime import datetime
 
-        # Exclude columns from the 'SET' clause
-        exclude_columns = ('CUSTOMER_ID', 'ACCOUNT_ID', 'CARD_NUM', 'LINK_CARD_NUM')
-        
-        # Extract the values for columns that are not excluded
-        values = [element[column] for column in columns if column not in exclude_columns]
-        logging.info(f"Reading all values of table: {values}")
+# Set default arguments for the DAG
+default_args = {
+    'start_date': datetime(2024, 10, 29),
+    'retries': 1,
+}
 
-        # Prepare the 'SET' clause by including only columns that are not excluded
-        set_columns = ', '.join([f"{col} = %s" for col in columns if col not in exclude_columns])
-        logging.info(f"Reading all set_columns of table: {set_columns}")
+# Define the DAG
+with DAG(
+    'bigquery_sql_dag',
+    default_args=default_args,
+    schedule_interval=None,
+    catchup=False,
+) as dag:
 
-        # Define condition columns for the 'WHERE' clause
-        condition_columns = ['CUSTOMER_ID', 'ACCOUNT_ID', 'CARD_NUM', 'LINK_CARD_NUM']
-        logging.info(f"Reading all condition_columns of table: {condition_columns}")
+    # Define the BigQuery SQL task
+    run_sql = BigQueryInsertJobOperator(
+        task_id='run_sql_script',
+        configuration={
+            "query": {
+                "query": """
+                    CREATE TEMP TABLE CTE_BIS_CUST_FPS_ADR_DET_DM AS
+                    SELECT
+                        CAST(PSDO_CUST_ID AS STRING) AS Customer_Id,
+                        'FPS' AS App_Cde,
+                        PROXY_ID_TYP AS Feat_Type_Cde,
+                        PROXY_ID AS App_Acces_Acct_Name,
+                        PSEUDO_ID AS Dig_CustId_Num,
+                        DFLT_BK_IDC AS Dflt_Bank_Ind,
+                        STUS AS Fst_Pymt_Sys_Acct_Stat_Cde,
+                        CUST_TYP AS Cust_Class_Cde,
+                        DEREGISTERED_DATE AS App_Dregis_Dt,
+                        image_dt
+                    FROM
+                        `{ihubcdl_project_id}.{ihubcdl_ibis_dataset_id_1}.BIS_CUST_FPS_ADR_DET_DM`
+                    WHERE
+                        CUST_TYP = 'PERS'
+                        AND STUS = 'A'
+                        AND DEREGISTERED_DATE IS NULL;
 
-        # Prepare the 'WHERE' clause using the condition columns
-        where_clause = ' AND '.join([f"{col} = %s" for col in condition_columns])
-        logging.info(f"Reading all where_clause of table: {where_clause}")
+                    CREATE TEMP TABLE CTE_MI_EVENT AS
+                    SELECT
+                        CAST(b.PSDO_CUST_ID AS STRING) AS CUST_ID,
+                        MAX(view_bdg_dt) AS PFM_LST_VISIT_DT
+                    FROM (
+                        SELECT
+                            CAST(TRIM(PIB_ID_NUM) AS STRING) AS net_id,
+                            EVENT_NAME, EVENT_STAT_CDE,
+                            EVENT_ACTION_NAME,
+                            MAX(DATE(EVENT_TS)) AS view_bdg_dt
+                        FROM
+                            `{ihubcdl_project_id}.{ihub_cdl_dataset_id_3}.MOBL_APP_VISIT`
+                        WHERE
+                            EVENT_NAME = 'DOMAIN_ACCOUNT_LIST'
+                            AND APP_PROG_INTF_NAME = 'GET/domestic-accounts'
+                            AND EVENT_ACTION_NAME = 'INSIGHT'
+                            AND EVENT_STAT_CDE = 'Success'
+                            AND LAST_UPDT_ID = 'NSD0001'
+                            AND SRCE_SYS_CDE = 'ASPDW'
+                        GROUP BY
+                            PIB_ID_NUM, EVENT_NAME, EVENT_STAT_CDE, EVENT_ACTION_NAME
+                    ) AS a
+                    LEFT JOIN
+                        `{ihubcdl_project_id}.{ihubcdl_ibis_dataset_id_1}.BIS_CUST_PIB_PORTF_DM` AS b
+                    ON
+                        CAST(a.net_id AS STRING) = CAST(TRIM(b.net_id) AS STRING)
+                    WHERE
+                        b.bk_sectr = 'P'
+                        AND b.PSDO_CUST_ID IS NOT NULL
+                    GROUP BY
+                        CUST_ID;
 
-        # Construct the final update query
-        update_query = f"""UPDATE {self.tgt_table_name} SET {set_columns} WHERE {where_clause}"""
-        logging.info(f"Update table query: {update_query}")
+                    CREATE OR REPLACE TABLE `{ihubcdl_project_id}.{ihub_cdl_dataset_id_3}.CTE_FINAL` AS
+                    SELECT
+                        a.Customer_Id,
+                        a.App_Cde,
+                        a.Feat_Type_Cde,
+                        a.App_Acces_Acct_Name,
+                        a.Dig_CustId_Num,
+                        a.Dflt_Bank_Ind,
+                        a.Fst_Pymt_Sys_Acct_Stat_Cde,
+                        a.Cust_Class_Cde,
+                        a.App_Dregis_Dt,
+                        b.PFM_LST_VISIT_DT AS App_Last_Acces_Dt,
+                        a.image_dt,
+                        ROW_NUMBER() OVER (PARTITION BY a.Customer_Id, a.App_Cde, a.Feat_Type_Cde ORDER BY a.image_dt DESC) AS row_num
+                    FROM
+                        CTE_BIS_CUST_FPS_ADR_DET_DM a
+                    LEFT JOIN
+                        CTE_MI_EVENT b
+                    ON
+                        a.Customer_Id = b.CUST_ID
+                    WHERE
+                        a.Customer_Id IS NOT NULL
+                        AND a.App_Cde IS NOT NULL
+                        AND a.Feat_Type_Cde IS NOT NULL
+                    QUALIFY
+                        row_num = 1;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
 
-        # Extract values for the WHERE clause (condition columns)
-        where_values = [element[col] for col in condition_columns]
-
-        # Combine set values and where values for the query execution
-        all_values = values + where_values
-
-        # Execute the query with the provided values
-        self.cursor.execute(update_query, all_values)
-        logging.info("Updating table...")
-
-        # Commit the transaction
-        self.conn.commit()
-
-    except Exception as e:
-        logging.error("Failed to update data: %s", str(e))
-        self.conn.rollback()  # Rollback in case of an error
-        self.updateConfigTable(self.postgres_config, self.uniqueNum, 'FAILED')
-        logging.info("Updated PostgreSQL Config table after failed update operation")
-
-        # Optionally raise an error to halt execution
-        # raise RuntimeError(f"Update failed for {self.tgt_table_name}") from e
+    run_sql
