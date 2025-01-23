@@ -1,108 +1,75 @@
 from airflow import DAG
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.providers.google.cloud.operators.gcs import GCSListObjectsOperator
 from datetime import datetime
+import os
 
-# Set default arguments for the DAG
+# Configuration
+GCS_BUCKET_NAME = "your-gcs-bucket-name"
+BIGQUERY_DATASET = "your_bigquery_dataset"
+
+# Default arguments for the DAG
 default_args = {
-    'start_date': datetime(2024, 10, 29),
-    'retries': 1,
+    "start_date": datetime(2025, 1, 1),
+    "retries": 1,
 }
 
 # Define the DAG
 with DAG(
-    'bigquery_sql_dag',
+    "load_csv_to_bigquery_dynamically",
     default_args=default_args,
-    schedule_interval=None,
+    schedule_interval=None,  # Trigger manually or as needed
     catchup=False,
 ) as dag:
 
-    # Define the BigQuery SQL task
-    run_sql = BigQueryInsertJobOperator(
-        task_id='run_sql_script',
-        configuration={
-            "query": {
-                "query": """
-                    CREATE TEMP TABLE CTE_BIS_CUST_FPS_ADR_DET_DM AS
-                    SELECT
-                        CAST(PSDO_CUST_ID AS STRING) AS Customer_Id,
-                        'FPS' AS App_Cde,
-                        PROXY_ID_TYP AS Feat_Type_Cde,
-                        PROXY_ID AS App_Acces_Acct_Name,
-                        PSEUDO_ID AS Dig_CustId_Num,
-                        DFLT_BK_IDC AS Dflt_Bank_Ind,
-                        STUS AS Fst_Pymt_Sys_Acct_Stat_Cde,
-                        CUST_TYP AS Cust_Class_Cde,
-                        DEREGISTERED_DATE AS App_Dregis_Dt,
-                        image_dt
-                    FROM
-                        `{ihubcdl_project_id}.{ihubcdl_ibis_dataset_id_1}.BIS_CUST_FPS_ADR_DET_DM`
-                    WHERE
-                        CUST_TYP = 'PERS'
-                        AND STUS = 'A'
-                        AND DEREGISTERED_DATE IS NULL;
-
-                    CREATE TEMP TABLE CTE_MI_EVENT AS
-                    SELECT
-                        CAST(b.PSDO_CUST_ID AS STRING) AS CUST_ID,
-                        MAX(view_bdg_dt) AS PFM_LST_VISIT_DT
-                    FROM (
-                        SELECT
-                            CAST(TRIM(PIB_ID_NUM) AS STRING) AS net_id,
-                            EVENT_NAME, EVENT_STAT_CDE,
-                            EVENT_ACTION_NAME,
-                            MAX(DATE(EVENT_TS)) AS view_bdg_dt
-                        FROM
-                            `{ihubcdl_project_id}.{ihub_cdl_dataset_id_3}.MOBL_APP_VISIT`
-                        WHERE
-                            EVENT_NAME = 'DOMAIN_ACCOUNT_LIST'
-                            AND APP_PROG_INTF_NAME = 'GET/domestic-accounts'
-                            AND EVENT_ACTION_NAME = 'INSIGHT'
-                            AND EVENT_STAT_CDE = 'Success'
-                            AND LAST_UPDT_ID = 'NSD0001'
-                            AND SRCE_SYS_CDE = 'ASPDW'
-                        GROUP BY
-                            PIB_ID_NUM, EVENT_NAME, EVENT_STAT_CDE, EVENT_ACTION_NAME
-                    ) AS a
-                    LEFT JOIN
-                        `{ihubcdl_project_id}.{ihubcdl_ibis_dataset_id_1}.BIS_CUST_PIB_PORTF_DM` AS b
-                    ON
-                        CAST(a.net_id AS STRING) = CAST(TRIM(b.net_id) AS STRING)
-                    WHERE
-                        b.bk_sectr = 'P'
-                        AND b.PSDO_CUST_ID IS NOT NULL
-                    GROUP BY
-                        CUST_ID;
-
-                    CREATE OR REPLACE TABLE `{ihubcdl_project_id}.{ihub_cdl_dataset_id_3}.CTE_FINAL` AS
-                    SELECT
-                        a.Customer_Id,
-                        a.App_Cde,
-                        a.Feat_Type_Cde,
-                        a.App_Acces_Acct_Name,
-                        a.Dig_CustId_Num,
-                        a.Dflt_Bank_Ind,
-                        a.Fst_Pymt_Sys_Acct_Stat_Cde,
-                        a.Cust_Class_Cde,
-                        a.App_Dregis_Dt,
-                        b.PFM_LST_VISIT_DT AS App_Last_Acces_Dt,
-                        a.image_dt,
-                        ROW_NUMBER() OVER (PARTITION BY a.Customer_Id, a.App_Cde, a.Feat_Type_Cde ORDER BY a.image_dt DESC) AS row_num
-                    FROM
-                        CTE_BIS_CUST_FPS_ADR_DET_DM a
-                    LEFT JOIN
-                        CTE_MI_EVENT b
-                    ON
-                        a.Customer_Id = b.CUST_ID
-                    WHERE
-                        a.Customer_Id IS NOT NULL
-                        AND a.App_Cde IS NOT NULL
-                        AND a.Feat_Type_Cde IS NOT NULL
-                    QUALIFY
-                        row_num = 1;
-                """,
-                "useLegacySql": False,
-            }
-        },
+    # Step 1: List all CSV files in the GCS bucket
+    list_csv_files = GCSListObjectsOperator(
+        task_id="list_csv_files",
+        bucket=GCS_BUCKET_NAME,
+        prefix="",  # Set a folder prefix if needed, e.g., "csv-folder/"
     )
 
-    run_sql
+    # Step 2: Define a function to generate tasks dynamically
+    def create_bigquery_load_task(file_name):
+        # Derive the table name from the file name
+        table_name = os.path.splitext(os.path.basename(file_name))[0]
+        table_id = f"{BIGQUERY_DATASET}.{table_name}"
+        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{file_name}"
+
+        return BigQueryInsertJobOperator(
+            task_id=f"load_{table_name}_to_bigquery",
+            configuration={
+                "load": {
+                    "sourceUris": [gcs_uri],
+                    "destinationTable": {
+                        "projectId": "{{ var.value.gcp_project }}",  # Set your GCP project
+                        "datasetId": BIGQUERY_DATASET,
+                        "tableId": table_name,
+                    },
+                    "sourceFormat": "CSV",
+                    "skipLeadingRows": 1,  # Skip header row
+                    "autodetect": True,  # Automatically detect schema
+                }
+            },
+            location="US",  # Adjust based on your BigQuery dataset location
+        )
+
+    # Step 3: Dynamically create load tasks based on the listed files
+    from airflow.models import TaskInstance
+
+    def create_dynamic_tasks(**context):
+        ti = context["ti"]
+        files = ti.xcom_pull(task_ids="list_csv_files")
+        if not files:
+            raise ValueError("No CSV files found in the bucket.")
+        load_tasks = []
+        for file in files:
+            if file.endswith(".csv"):
+                load_tasks.append(create_bigquery_load_task(file))
+        return load_tasks
+
+    # Step 4: Dynamic task generation
+    dynamic_load_tasks = create_dynamic_tasks
+
+    # DAG Workflow
+    list_csv_files >> dynamic_load_tasks
